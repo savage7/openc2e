@@ -3,6 +3,7 @@
 #include "AgentInjector.h"
 #include "BrainViewer.h"
 #include "CreatureGrapher.h"
+#include "GeneInspector.h"
 #include "Engine.h"
 #include "Hatchery.h"
 #include "ImGuiUtils.h"
@@ -211,7 +212,10 @@ void DrawMainMenu() {
 		}
 		if (ImGui::MenuItem("Creature Grapher")) {
 			SetCreatureGrapherOpen(true);
-		};
+		}
+		if (ImGui::MenuItem("Gene Inspector")) {
+			SetGeneInspectorOpen(true);
+		}
 		ImGui::EndMenu();
 	}
 }

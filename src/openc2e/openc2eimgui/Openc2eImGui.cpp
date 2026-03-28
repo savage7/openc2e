@@ -7,6 +7,7 @@
 #include "C2ToolBar.h"
 #include "CreatureGrapher.h"
 #include "Engine.h"
+#include "GeneInspector.h"
 #include "Hatchery.h"
 #include "MainMenu.h"
 #include "common/Exception.h"
@@ -56,6 +57,7 @@ void Update() {
 	Openc2eImgui::DrawAgentInjector();
 	Openc2eImgui::DrawBrainViewer();
 	Openc2eImgui::DrawCreatureGrapher();
+	Openc2eImgui::DrawGeneInspector();
 	Openc2eImgui::DrawHatchery();
 }
 

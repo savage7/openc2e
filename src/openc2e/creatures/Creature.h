@@ -21,6 +21,7 @@
 #define __CREATURE_H
 
 #include "AgentRef.h"
+#include "GeneSwitch.h"
 #include "fileformats/genomeFile.h"
 
 #include <cassert>
@@ -115,7 +116,7 @@ class Creature {
 	void born();
 	void die();
 
-	bool shouldProcessGene(gene*);
+	bool shouldProcessGene(gene* g, GeneSwitch mode = GeneSwitch::Age);
 };
 
 #endif

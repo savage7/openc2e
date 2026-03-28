@@ -700,8 +700,15 @@ void SkeletalCreature::tick() {
 			// TODO: we shouldn't bother with this unless it changed?
 			setGaitGene(creature->getGait());
 
-			// TODO: we should only do this if we're moving :-P
 			gaitTick();
+
+			// Apply actual movement based on direction
+			float speed = 1.0f;
+			if (direction == 3) { // left
+				x -= speed;
+			} else if (direction == 2) { // right
+				x += speed;
+			}
 		}
 
 		approaching = false;

@@ -22,6 +22,7 @@
 
 #include "fileformats/genomeFile.h"
 
+#include <algorithm>
 #include <cassert>
 #include <map>
 #include <set>
@@ -44,6 +45,7 @@ class c2eBrainComponent {
 	virtual void init() = 0;
 	virtual void tick() = 0;
 	uint8_t getUpdateTime() { return updatetime; }
+	void setUpdateTime(unsigned int t) { updatetime = static_cast<uint8_t>(t); }
 	bool wasInited() { return inited; }
 
 	c2eBrainComponent(class c2eBrain* b)
@@ -61,13 +63,36 @@ struct c2erule {
 	float operandvalue;
 };
 
+/*
+ * ReinforcementDetails
+ *
+ * Stores reward or punishment configuration for a tract.
+ * Opcodes 57-59 set reward fields; opcodes 60-62 set punishment fields.
+ * processRewardAndPunishment() uses these to modify dendrite STW.
+ */
+struct ReinforcementDetails {
+	float threshold = 0.0f;
+	float rate = 0.0f;
+	int chemical_index = 0;
+	bool supported = false;
+
+	void reinforce(float chemical_level, float& weight, float susceptibility = 1.0f) {
+		if (chemical_level > threshold) {
+			float modifier = chemical_level - threshold;
+			weight = std::max(-1.0f, std::min(1.0f, weight + (rate * modifier * susceptibility)));
+		}
+	}
+};
+
+class c2eTract;
+
 class c2eSVRule {
   protected:
 	std::vector<c2erule> rules;
 
   public:
 	void init(uint8_t ruledata[48]);
-	bool runRule(float acc, float srcneuron[8], float neuron[8], float spareneuron[8], float dendrite[8], class c2eCreature* creature);
+	bool runRule(float acc, float srcneuron[8], float neuron[8], float spareneuron[8], float dendrite[8], class c2eCreature* creature, c2eTract* owner = nullptr);
 };
 
 struct c2eNeuron {
@@ -112,10 +137,17 @@ class c2eTract : public c2eBrainComponent {
 	void doMigration();
 
   public:
+	// Reward/punishment reinforcement configuration (set by SVRule opcodes 57-62)
+	ReinforcementDetails reward;
+	ReinforcementDetails punishment;
+	// Per-tract STW-to-LTW rate (set by SVRule opcode 43, used by opcode 44)
+	float stw_to_ltw_rate = 0.0f;
+
 	c2eTract(class c2eBrain* b, c2eBrainTractGene* g);
 	void tick();
 	void init();
 	void wipe();
+	void processRewardAndPunishment(c2eDendrite& d);
 	c2eBrainTractGene* getGene() { return ourGene; }
 	unsigned int getNoDendrites() { return dendrites.size(); }
 	c2eDendrite* getDendrite(unsigned int i) { return &dendrites[i]; }

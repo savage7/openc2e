@@ -46,7 +46,7 @@ static void DrawAgentPreview(Texture& texture) {
 }
 
 bool IsAgentInjectorEnabled() {
-	return engine.version == 1 || engine.version == 2;
+	return engine.version >= 1;
 }
 
 void SetAgentInjectorOpen(bool is_open) {

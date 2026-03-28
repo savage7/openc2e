@@ -21,16 +21,21 @@
 
 #include "Catalogue.h"
 #include "CreatureAgent.h"
+#include "SkeletalCreature.h"
 #include "World.h"
 #include "c2eBrain.h"
 #include "c2eCreature.h"
 #include "common/throw_ifnot.h"
+#include "fileformats/genomeFile.h"
 #include "historyManager.h"
 #include "oldBrain.h"
 #include "oldCreature.h"
 
+#include <algorithm>
 #include <cassert>
+#include <cstring>
 #include <memory>
+#include <typeinfo>
 
 Creature::Creature(std::shared_ptr<genomeFile> g, bool is_female, unsigned char _variant, CreatureAgent* a) {
 	assert(g);
@@ -67,32 +72,51 @@ void Creature::finishInit() {
 	processGenes();
 }
 
-bool Creature::shouldProcessGene(gene* g) {
+bool Creature::shouldProcessGene(gene* g, GeneSwitch mode) {
 	geneFlags& flags = g->header.flags;
 
 	// non-expressed genes are to be ignored
 	if (flags.notexpressed)
 		return false;
 
-	// gender-specific genes are only to be processed if they are of this
+	// gender-specific genes are only to be processed if they are of this gender
 	if (flags.femaleonly && !female)
 		return false;
 	if (flags.maleonly && female)
 		return false;
 
-	// obviously we only switch on at the stage in question
-	if (g->header.switchontime != stage)
+	// Variant filter (AGE-04): variant 0 means "all variants"; non-zero must match creature variant
+	if (g->header.variant != 0 && g->header.variant != variant)
 		return false;
 
-	// TODO: header.variant?
-
-	return true;
+	// Switch mode logic (AGE-01 through AGE-03, per lc2e Genome.cpp:739-754 clean-room)
+	switch (mode) {
+		case GeneSwitch::Age:     return g->header.switchontime == stage;
+		case GeneSwitch::UpToAge: return g->header.switchontime <= stage;
+		case GeneSwitch::Always:  return true;
+		case GeneSwitch::Embryo:  return stage == baby;
+	}
+	return false;
 }
 
 void Creature::processGenes() {
-	for (auto& gene : genome->genes) {
-		if (shouldProcessGene(gene.get()))
-			addGene(gene.get());
+	for (auto& g : genome->genes) {
+		// Determine the correct switch mode per gene type (AGE-01 through AGE-03).
+		// In lc2e the switch mode is a call-site parameter, not stored in the gene.
+		// Brain lobe and tract genes use UpToAge so a mutated switchontime cannot
+		// prevent brain structure from initialising.
+		// Instinct genes use Always — they are collected at every age transition.
+		// All other genes (biochemistry, appearance, etc.) use Age (exact match).
+		GeneSwitch mode = GeneSwitch::Age;
+		const gene* gptr = g.get();
+		if (typeid(*gptr) == typeid(c2eBrainLobeGene) ||
+		    typeid(*gptr) == typeid(c2eBrainTractGene)) {
+			mode = GeneSwitch::UpToAge;
+		} else if (typeid(*gptr) == typeid(creatureInstinctGene)) {
+			mode = GeneSwitch::Always;
+		}
+		if (shouldProcessGene(g.get(), mode))
+			addGene(g.get());
 	}
 }
 
@@ -302,6 +326,20 @@ c2eCreature::c2eCreature(std::shared_ptr<genomeFile> g, bool is_female, unsigned
 
 	halflives = 0;
 
+	// Initialise expression weight tables to zero
+	for (int e = 0; e < 6; e++) {
+		expressionOverall[e] = 0.0f;
+		for (int d = 0; d < 20; d++) {
+			expressionWeights[e][d] = 0.0f;
+		}
+	}
+
+	// Initialise pending STIM buffers to zero
+	for (int i = 0; i < 40; i++) {
+		pendingVerbStim[i] = 0.0f;
+		pendingNounStim[i] = 0.0f;
+	}
+
 	if (!catalogue.hasTag("Action Script To Neuron Mappings"))
 		throw Exception("c2eCreature was unable to read the 'Action Script To Neuron Mappings' catalogue tag");
 	const std::vector<std::string>& mappinginfotag = catalogue.getTag("Action Script To Neuron Mappings");
@@ -409,12 +447,109 @@ void c2Creature::tick() {
 	Creature::tick();
 }
 
+void c2eCreature::updateSensoryFaculty() {
+	// Environmental senses not tied to brain lobes (per D-12)
+	// senses[0] (always-on) and senses[1] (asleep) are already set in tick()
+	// senses[5] crowdedness left as 0.0f for Phase 5 (per research recommendation)
+	// senses[9] air quality left as 1.0f for Phase 5
+	// Note: brain lobe inputs (visn, smel, verb, noun) are updated inside
+	// tickBrain() where they must be set BEFORE brain.tick() (Pitfall 3)
+}
+
+void c2eCreature::updateLifeFaculty() {
+	// Aggregate organ lifeforces to determine overall creature health (per D-06)
+	float totalLifeforce = 0.0f;
+	for (auto& organ : organs) {
+		totalLifeforce += organ->getShortTermLifeforce();
+	}
+	// Death: if all organs have zero lifeforce and creature has been alive long enough
+	// Only SET dead locus — actual die() call remains at existing location in tick() (per D-04)
+	if (!organs.empty() && totalLifeforce <= 0.0f && ticks > 100) {
+		dead = 1.0f;
+	}
+}
+
+void c2eCreature::updateMotorFaculty() {
+	// Energy feedback from organ health into biochemistry (per D-16)
+	// muscleenergy is an emitter locus (organ=1, tissue=0, locus=0)
+	// NOTE: The full motor chain (brain -> gaitloci[] -> getGait() -> setGaitGene())
+	// is already functional via the locus/receptor system + SkeletalCreature::creatureTick().
+	// This method only provides the energy feedback piece.
+	if (organs.empty()) {
+		muscleenergy = 0.0f;
+	} else {
+		float totalLifeforce = 0.0f;
+		for (auto& organ : organs) {
+			totalLifeforce += organ->getShortTermLifeforce();
+		}
+		muscleenergy = std::min(1.0f, totalLifeforce / static_cast<float>(organs.size()));
+	}
+}
+
+void c2eCreature::updateExpressiveFaculty() {
+	// Map drives to a facial expression index [0,5] via expression gene weights (per D-11, D-13)
+	// For each expression compute: score = sum_d(expressionWeights[e][d] * (drives[d] - 0.5f)) * expressionOverall[e]
+	// Choose argmax; default to 0 (EXPR_NORMAL) if all scores <= 0
+	SkeletalCreature* sc = dynamic_cast<SkeletalCreature*>(parentagent);
+	if (!sc)
+		return;
+
+	int bestExprId = 0;
+	float bestScore = 0.0f;
+	for (int e = 0; e < 6; e++) {
+		float score = 0.0f;
+		for (int d = 0; d < 20; d++) {
+			score += expressionWeights[e][d] * (drives[d] - 0.5f);
+		}
+		score *= expressionOverall[e];
+		if (score > bestScore) {
+			bestScore = score;
+			bestExprId = e;
+		}
+	}
+	// Clamp to [0, 5] (per Pitfall 6)
+	if (bestExprId < 0) bestExprId = 0;
+	if (bestExprId > 5) bestExprId = 5;
+	sc->setFacialExpression((unsigned int)bestExprId);
+}
+
+void c2eCreature::updateReproductiveFaculty() {
+	// Ovulate thermostat with hysteresis (per D-07, D-09)
+	// OVULATEOFF = 0.314f, OVULATEON = 0.627f
+	static const float OVULATEOFF = 0.314f;
+	static const float OVULATEON = 0.627f;
+
+	if (myGamete && ovulate < OVULATEOFF) {
+		myGamete = false;
+	} else if (!myGamete && ovulate > OVULATEON) {
+		myGamete = true;
+	}
+	fertile = myGamete ? 1.0f : 0.0f;
+
+	// Pregnancy state: slot 1 occupied => pregnant = 1.0f (per D-09)
+	// genome_slots is on the Agent base class (Agent.h line 98)
+	auto it = parentagent->genome_slots.find(1);
+	if (it != parentagent->genome_slots.end() && it->second) {
+		pregnant = 1.0f;
+	} else {
+		pregnant = 0.0f;
+	}
+}
+
+void c2eCreature::updateLinguisticFaculty() {
+	// LinguisticFaculty: hearing->vocabulary wiring handled via tickBrain() verb/noun lobes + VOCB CAOS command
+	// No direct logic here — verb/noun lobe inputs are driven by pendingVerbStim/pendingNounStim arrays
+	// which are populated in handleStimulus() and consumed in tickBrain() (Task 3)
+}
+
+void c2eCreature::updateMusicFaculty() {
+	// MusicFaculty: Update() is a no-op per lc2e. Mood()/Threat() output state used by MNG audio selection.
+}
+
 void c2eCreature::tick() {
 	// TODO: should we tick some things even if dead?
 	if (!alive)
 		return;
-
-	// TODO: update muscleenergy
 
 	senses[0] = 1.0f; // always-on
 	senses[1] = (asleep ? 1.0f : 0.0f); // asleep
@@ -427,13 +562,26 @@ void c2eCreature::tick() {
 	// space for old C2 senses: oncoming wind, wind from behind
 
 	tickBrain();
+	tickNeuroEmitters();
 	tickBiochemistry();
+	// SensoryFaculty: environmental senses (per D-17/D-18, brain lobe inputs are in tickBrain)
+	updateSensoryFaculty();
+	// MotorFaculty: energy feedback from organ health (per D-17, D-16)
+	updateMotorFaculty();
+	// Phase 6 faculties: expressive, reproductive, linguistic, music
+	updateExpressiveFaculty();
+	updateReproductiveFaculty();
+	updateLinguisticFaculty();
+	updateMusicFaculty();
 
 	// lifestage checks
 	for (unsigned int i = 0; i < 7; i++) {
 		if ((lifestageloci[i] != 0.0f) && (stage == (lifestage)i))
 			ageCreature();
 	}
+
+	// LifeFaculty: aggregate organ health -> set dead locus (per D-17)
+	updateLifeFaculty();
 
 	if (dead != 0.0f)
 		die();
@@ -488,6 +636,30 @@ void c2Creature::addGene(gene* g) {
 	}
 }
 
+void c2eCreature::tickNeuroEmitters() {
+	for (auto& ne : neuroemitters) {
+		ne.bioTick += ne.data->rate / 255.0f;
+		if (ne.bioTick < 1.0f)
+			continue;
+		ne.bioTick -= 1.0f;
+
+		// Multiply all three neuron activations together
+		// Null inputs treated as 1.0 (lc2e myDefaultNeuronInput = 1.0f)
+		float activation = 1.0f;
+		for (int i = 0; i < 3; i++) {
+			if (ne.inputs[i])
+				activation *= *ne.inputs[i];
+		}
+
+		// Emit each chemical proportional to activation
+		for (int o = 0; o < 4; o++) {
+			if (ne.data->chemical[o] == 0) continue; // chemical 0 = no chemical
+			float amount = (ne.data->quantity[o] / 255.0f) * activation;
+			adjustChemical(ne.data->chemical[o], amount);
+		}
+	}
+}
+
 void c2eCreature::addGene(gene* g) {
 	Creature::addGene(g);
 
@@ -515,6 +687,35 @@ void c2eCreature::addGene(gene* g) {
 		bioHalfLivesGene* d = dynamic_cast<bioHalfLivesGene*>(g);
 		assert(d);
 		halflives = d;
+	} else if (typeid(*g) == typeid(bioNeuroEmitterGene)) {
+		bioNeuroEmitterGene* neg = (bioNeuroEmitterGene*)g;
+		// Check for duplicate: replace if all 3 input pointers match (prevents double emission on age-switch re-expression)
+		c2eNeuroEmitter newne(neg, this);
+		bool replaced = false;
+		for (auto& existing : neuroemitters) {
+			if (existing.inputs[0] == newne.inputs[0] &&
+				existing.inputs[1] == newne.inputs[1] &&
+				existing.inputs[2] == newne.inputs[2]) {
+				existing = newne;
+				replaced = true;
+				break;
+			}
+		}
+		if (!replaced)
+			neuroemitters.push_back(newne);
+	} else if (typeid(*g) == typeid(creatureFacialExpressionGene)) {
+		// Load expression gene drive weights into expression tables (per Pitfall 1)
+		creatureFacialExpressionGene* eg = (creatureFacialExpressionGene*)g;
+		int exprno = (int)eg->expressionno;
+		if (exprno >= 0 && exprno <= 5) {
+			expressionOverall[exprno] = eg->weight / 255.0f;
+			for (int i = 0; i < 4; i++) {
+				int driveIndex = (int)eg->drives[i];
+				if (driveIndex >= 0 && driveIndex < 20) {
+					expressionWeights[exprno][driveIndex] = eg->amounts[i] / 255.0f;
+				}
+			}
+		}
 	}
 }
 

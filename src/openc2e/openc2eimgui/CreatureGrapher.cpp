@@ -30,6 +30,12 @@ void DrawCreatureGrapher() {
 		static size_t s_selected_chemical_group = 0;
 		static int s_selected_chemical = 0;
 
+		if (!world.selectedcreature) {
+			ImGui::TextUnformatted("No creature selected");
+			ImGui::End();
+			return;
+		}
+
 		if (world.tickcount != s_last_tickcount) {
 			s_last_tickcount = world.tickcount;
 			// TODO: we should only update on biochem ticks..
@@ -65,6 +71,13 @@ void DrawCreatureGrapher() {
 			-1,
 			1,
 			ImVec2(320, 200));
+
+		if (s_selected_creature) {
+			c2eCreature* cc = dynamic_cast<c2eCreature*>(s_selected_creature->getCreature());
+			if (cc) {
+				ImGui::Text("Current: %.4f", cc->getChemical(s_selected_chemical));
+			}
+		}
 
 		float content_width = ImGui::GetContentRegionAvail().x;
 

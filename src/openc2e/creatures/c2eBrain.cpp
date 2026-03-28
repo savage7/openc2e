@@ -229,14 +229,56 @@ void c2eTract::tick() {
 	if (ourGene->migrates)
 		doMigration();
 
-	// run the svrule(s) against every neuron
+	// run the svrule(s) against every dendrite, passing this tract as owner
+	// so opcodes 43/44/57-62 can access per-tract state
 	for (auto& dendrite : dendrites) {
 		if (ourGene->initrulealways)
-			initrule.runRule(dendrite.source->variables[0], dendrite.source->variables, dendrite.dest->variables, dummyValues, dendrite.variables, parent->getParent());
-		updaterule.runRule(dendrite.source->variables[0], dendrite.source->variables, dendrite.dest->variables, dummyValues, dendrite.variables, parent->getParent());
+			initrule.runRule(dendrite.source->variables[0], dendrite.source->variables, dendrite.dest->variables, dummyValues, dendrite.variables, parent->getParent(), this);
+		updaterule.runRule(dendrite.source->variables[0], dendrite.source->variables, dendrite.dest->variables, dummyValues, dendrite.variables, parent->getParent(), this);
 	}
 
-	// TODO: reward/punishment? anything else? scary brains!
+	// Apply reward/punishment reinforcement to each dendrite
+	for (auto& dendrite : dendrites) {
+		processRewardAndPunishment(dendrite);
+	}
+}
+
+/*
+ * c2eTract::processRewardAndPunishment
+ *
+ * Applies reward and/or punishment reinforcement to the given dendrite.
+ * Called after SVRule processing of all dendrites in tick().
+ *
+ * Conditions for reinforcement:
+ *   - reward.supported or punishment.supported must be true (set by opcodes 59/62)
+ *   - dest neuron OUTPUT_VAR (variables[2]) must be non-zero (neuron must be active)
+ *   - chemical level must exceed threshold
+ *
+ * When conditions met, modifies dendrite STW (variables[0]) by:
+ *   weight += rate * (chemical_level - threshold), clamped to [-1, 1]
+ */
+void c2eTract::processRewardAndPunishment(c2eDendrite& d) {
+	if (!(reward.supported || punishment.supported))
+		return;
+
+	// Only reinforce when destination neuron is active (OUTPUT_VAR != 0)
+	if (d.dest->variables[2] == 0.0f)
+		return;
+
+	c2eCreature* creature = parent->getParent();
+
+	// Age-susceptibility: baby (stage=0) = 1.0, senile (stage=6) ~= 0.14
+	// Young creatures learn faster from reward/punishment (per D-13/D-15)
+	float susceptibility = 1.0f - (static_cast<float>(creature->getStage()) / 7.0f);
+
+	if (reward.supported) {
+		float chem_level = creature->getChemical(static_cast<unsigned char>(reward.chemical_index));
+		reward.reinforce(chem_level, d.variables[0], susceptibility); // variables[0] = WEIGHT_SHORTTERM_VAR
+	}
+	if (punishment.supported) {
+		float chem_level = creature->getChemical(static_cast<unsigned char>(punishment.chemical_index));
+		punishment.reinforce(chem_level, d.variables[0], susceptibility);
+	}
 }
 
 void c2eTract::wipe() {
@@ -516,13 +558,13 @@ inline void warnUnimplementedSVRule(unsigned char data, bool opcode = true) {
  * Returns whether the 'register as spare' opcode was executed or not.
  *
  */
-bool c2eSVRule::runRule(float acc, float srcneuron[8], float neuron[8], float spareneuron[8], float dendrite[8], c2eCreature* creature) {
+bool c2eSVRule::runRule(float acc, float srcneuron[8], float neuron[8], float spareneuron[8], float dendrite[8], c2eCreature* creature, c2eTract* owner) {
 	float accumulator = acc;
 	float operandvalue = 0.0f; // valid rules should never use this
 	float tendrate = 0.0f;
 	float* operandpointer;
 	float dummy;
-	static float stw = 0.0f; // TODO: good default?
+	float local_stw = 0.0f; // fallback for lobe context (owner == nullptr)
 	bool is_spare = false;
 	bool skip_next = false;
 
@@ -772,49 +814,49 @@ bool c2eSVRule::runRule(float acc, float srcneuron[8], float neuron[8], float sp
 					accumulator = 0.0f;
 				break;
 
-			case 37: // leakage rate
-				// TODO
-				warnUnimplementedSVRule(rule.opcode);
+			case 37: // leakage rate -- set tendrate for use by opcode 38
+				tendrate = operandvalue;
 				break;
 
-			case 38: // rest state
-				// TODO
-				warnUnimplementedSVRule(rule.opcode);
+			case 38: // rest state -- tend INPUT_VAR toward operand at tendrate
+				neuron[1] = neuron[1] * (1.0f - tendrate) + operandvalue * tendrate;
 				break;
 
-			case 39: // input gain hi-lo
-				// TODO
-				warnUnimplementedSVRule(rule.opcode);
+			case 39: // input gain hi-lo -- multiply INPUT_VAR by operand
+				neuron[1] *= operandvalue;
 				break;
 
-			case 40: // persistence
-				// TODO
-				warnUnimplementedSVRule(rule.opcode);
+			case 40: // persistence -- blend INPUT_VAR into STATE_VAR
+				neuron[0] = neuron[1] * (1.0f - operandvalue) + neuron[0] * operandvalue;
 				break;
 
-			case 41: // signal noise
-				// TODO
-				warnUnimplementedSVRule(rule.opcode);
+			case 41: // signal noise -- add scaled random noise to STATE_VAR
+				neuron[0] += operandvalue * rand_float(0.0f, 1.0f);
 				break;
 
-			case 42: // winner takes all
-				// TODO
-				warnUnimplementedSVRule(rule.opcode);
+			case 42: // winner takes all -- if neuron wins, set OUTPUT_VAR; zero loser OUTPUT_VAR
+				if (neuron[0] >= spareneuron[0]) {
+					spareneuron[2] = 0.0f;       // zero loser's OUTPUT_VAR
+					neuron[2] = neuron[0];        // winner's OUTPUT_VAR = STATE_VAR
+					is_spare = true;              // mark spare as updated
+				}
 				break;
 
-			case 43: // short-term relax rate
-				// TODO: should this be stored in the parent object, maybe?
-				// TODO: make sure this is correct
-				stw = operandvalue;
+			case 43: // short-term relax rate -- stored per-tract for correct independent behavior
+				if (owner)
+					owner->stw_to_ltw_rate = operandvalue;
+				else
+					local_stw = operandvalue;
 				break;
 
 			case 44: // long-term relax rate
 				// TODO: make sure this is correct
 				// TODO: is this possible for neurons? (prbly not)
 				{
+					float stw_rate = owner ? owner->stw_to_ltw_rate : local_stw;
 					float weight = dendrite[0];
 					// push weight downwards towards steady state (short-term learning)
-					dendrite[0] = weight + (dendrite[1] - weight) * stw;
+					dendrite[0] = weight + (dendrite[1] - weight) * stw_rate;
 					// pull steady state upwards towards weight (long-term learning)
 					dendrite[1] = dendrite[1] + (weight - dendrite[1]) * operandvalue;
 				}
@@ -878,34 +920,34 @@ bool c2eSVRule::runRule(float acc, float srcneuron[8], float neuron[8], float sp
 					goto done;
 				break;
 
-			case 57: // reward threshold
-				// TODO
-				warnUnimplementedSVRule(rule.opcode);
+			case 57: // reward threshold -- set owner->reward.threshold (clamped)
+				if (owner) owner->reward.threshold = bindFloatValue(operandvalue, -1.0f, 1.0f);
 				break;
 
-			case 58: // reward rate
-				// TODO
-				warnUnimplementedSVRule(rule.opcode);
+			case 58: // reward rate -- set owner->reward.rate (clamped)
+				if (owner) owner->reward.rate = bindFloatValue(operandvalue, -1.0f, 1.0f);
 				break;
 
-			case 59: // use reward with
-				// TODO
-				warnUnimplementedSVRule(rule.opcode);
+			case 59: // use reward with -- set chemical index and mark reward as supported
+				if (owner) {
+					owner->reward.chemical_index = static_cast<int>(operandvalue) % 256;
+					owner->reward.supported = true;
+				}
 				break;
 
-			case 60: // punish threshold
-				// TODO
-				warnUnimplementedSVRule(rule.opcode);
+			case 60: // punish threshold -- set owner->punishment.threshold (clamped)
+				if (owner) owner->punishment.threshold = bindFloatValue(operandvalue, -1.0f, 1.0f);
 				break;
 
-			case 61: // punish rate
-				// TODO
-				warnUnimplementedSVRule(rule.opcode);
+			case 61: // punish rate -- set owner->punishment.rate (clamped)
+				if (owner) owner->punishment.rate = bindFloatValue(operandvalue, -1.0f, 1.0f);
 				break;
 
-			case 62: // use punish with
-				// TODO
-				warnUnimplementedSVRule(rule.opcode);
+			case 62: // use punish with -- set chemical index and mark punishment as supported
+				if (owner) {
+					owner->punishment.chemical_index = static_cast<int>(operandvalue) % 256;
+					owner->punishment.supported = true;
+				}
 				break;
 
 			case 63: // preserve neuron SV

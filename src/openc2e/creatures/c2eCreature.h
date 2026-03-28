@@ -53,6 +53,13 @@ struct c2eEmitter {
 	float threshold, gain;
 };
 
+struct c2eNeuroEmitter {
+	c2eNeuroEmitter(bioNeuroEmitterGene*, class c2eCreature*);
+	bioNeuroEmitterGene* data;
+	float bioTick;    // emission accumulator; fires when >= 1.0f
+	float* inputs[3]; // neuron variable pointers (null = treat as 1.0)
+};
+
 class c2eOrgan {
   protected:
 	friend struct c2eReceptor;
@@ -154,12 +161,34 @@ class c2eCreature : public Creature {
 	bioHalfLivesGene* halflives;
 
 	class c2eBrain* brain;
+	std::vector<c2eNeuroEmitter> neuroemitters;
 
 	void tickBrain();
 	bool processInstinct();
+	void tickNeuroEmitters();
 	void tickBiochemistry();
+	void updateSensoryFaculty();
+	void updateLifeFaculty();
+	void updateMotorFaculty();
+	void updateExpressiveFaculty();
+	void updateReproductiveFaculty();
+	void updateLinguisticFaculty();
+	void updateMusicFaculty();
 	void processGenes();
 	void addGene(gene*);
+
+	// Reproductive faculty thermostat state
+	bool myGamete = false;
+
+	// Expression gene drive-to-expression mapping: 6 expressions x 20 drives
+	float expressionWeights[6][20];
+	// Per-expression overall weight from expression gene
+	float expressionOverall[6];
+
+	// Pending stimulus buffers for hearing wiring (Task 3)
+	// STIM events set these; tickBrain() consumes them
+	float pendingVerbStim[40];
+	float pendingNounStim[40];
 
 	int reverseMapVerbToNeuron(unsigned int verb);
 	AgentRef selectRepresentativeAgent(int type, std::vector<AgentRef> possibles);
@@ -190,6 +219,11 @@ class c2eCreature : public Creature {
 		assert(i < organs.size());
 		return organs[i];
 	}
+
+	float getFertile() const { return fertile; }
+	float getReceptive() const { return receptive; }
+	float getChanceOfMutation() const { return chanceofmutation; }
+	float getDegreeOfMutation() const { return degreeofmutation; }
 
 	class c2eBrain* getBrain() {
 		return brain;

@@ -18,6 +18,8 @@
  */
 
 #include "CreatureAgent.h"
+#include "Map.h"
+#include "Room.h"
 #include "World.h"
 #include "c2eBrain.h"
 #include "c2eCreature.h"
@@ -111,19 +113,23 @@ void c2eCreature::tickBrain() {
 		}
 	}
 
-	/*c2eLobe *verblobe = brain->getLobeById("verb");
+	// Hearing wiring: verb/noun lobe inputs driven by STIM-event pending buffers (Phase 6, D-06)
+	// pendingVerbStim/pendingNounStim are populated by handleStimulus() and cleared here after use
+	c2eLobe *verblobe = brain->getLobeById("verb");
 	if (verblobe) {
 		for (unsigned int i = 0; i < verblobe->getNoNeurons(); i++) {
-			verblobe->setNeuronInput(i, 0.0f); // TODO
+			verblobe->setNeuronInput(i, (i < 40) ? pendingVerbStim[i] : 0.0f);
+			if (i < 40) pendingVerbStim[i] = 0.0f;
 		}
 	}
-	
+
 	c2eLobe *nounlobe = brain->getLobeById("noun");
 	if (nounlobe) {
 		for (unsigned int i = 0; i < nounlobe->getNoNeurons(); i++) {
-			nounlobe->setNeuronInput(i, 0.0f); // TODO
-		}	
-	}*/
+			nounlobe->setNeuronInput(i, (i < 40) ? pendingNounStim[i] : 0.0f);
+			if (i < 40) pendingNounStim[i] = 0.0f;
+		}
+	}
 
 #ifndef _CREATURE_STANDALONE
 	// TODO: situ, detl
@@ -149,7 +155,14 @@ void c2eCreature::tickBrain() {
 
 	c2eLobe* smellobe = brain->getLobeById("smel");
 	if (smellobe) {
-		// TODO
+		// Smell: map room CA channels to smel lobe neurons (per D-10)
+		// Direct index mapping: CA[i] -> neuron[i], bounded by lobe size
+		std::shared_ptr<Room> r = world.map->roomAt(parentagent->x, parentagent->y);
+		if (r) {
+			for (int i = 0; i < CA_COUNT && i < (int)smellobe->getNoNeurons(); i++) {
+				smellobe->setNeuronInput(i, r->ca[i]);
+			}
+		}
 	}
 #endif
 
@@ -270,9 +283,15 @@ bool c2eCreature::processInstinct() {
 
 	// *** reset brain
 
-	// TODO: is this a sensible place to wipe the lobes?
-	for (auto& lobe : brain->lobes)
-		lobe.second->wipe();
+	// Clear only activation state (STATE_VAR) — preserve all other neuron variables
+	// and all dendrite state. Per lc2e ClearActivity() which only zeros states[0].
+	// Do NOT call lobe->wipe() — it zeros all 8 variables, destroying learned state.
+	for (auto& lobe_pair : brain->lobes) {
+		c2eLobe* lobe = lobe_pair.second;
+		for (unsigned int i = 0; i < lobe->getNoNeurons(); i++) {
+			lobe->getNeuron(i)->variables[0] = 0.0f;
+		}
+	}
 
 	// TODO: non-hardcode 212/213? they seem to be in "Brain Parameters" catalogue tag
 	// TODO: won't learning be sort of ruined by the repeated application of pre-REM?
@@ -318,10 +337,14 @@ bool c2eCreature::processInstinct() {
 	// TODO: shouldn't REM be present throughout sleep?
 	chemicals[213] = 0.0f; // REM to null
 
-	// wipe the lobes again, to stop any issues with neurons being set which shouldn't be at the end of an instinct run
-	// TODO: is wiping the lobes here truly what we should do?
-	for (auto& lobe : brain->lobes)
-		lobe.second->wipe();
+	// Clear activation state only after instinct replay completes.
+	// Preserves dendrite weights (STW/LTW) that were modified during replay.
+	for (auto& lobe_pair : brain->lobes) {
+		c2eLobe* lobe = lobe_pair.second;
+		for (unsigned int i = 0; i < lobe->getNoNeurons(); i++) {
+			lobe->getNeuron(i)->variables[0] = 0.0f;
+		}
+	}
 
 	//fmt::print("*** instinct done\n");
 	//fmt::print("\n");
@@ -426,6 +449,9 @@ void c2eCreature::handleStimulus(c2eStim& stim) {
 			if ((unsigned int)stim.verb_id < verblobe->getNoNeurons())
 				verblobe->setNeuronInput(stim.verb_id, stim.verb_amount);
 		}
+		// Also store in pending buffer for next tickBrain() (hearing wiring, D-06)
+		if (stim.verb_id < 40)
+			pendingVerbStim[stim.verb_id] = stim.verb_amount;
 	}
 
 	if (stim.noun_id >= 0) {
@@ -434,6 +460,9 @@ void c2eCreature::handleStimulus(c2eStim& stim) {
 			if ((unsigned int)stim.noun_id < nounlobe->getNoNeurons())
 				nounlobe->setNeuronInput(stim.noun_id, stim.noun_amount);
 		}
+		// Also store in pending buffer for next tickBrain() (hearing wiring, D-06)
+		if (stim.noun_id < 40)
+			pendingNounStim[stim.noun_id] = stim.noun_amount;
 	}
 
 	for (unsigned int i = 0; i < 4; i++) {

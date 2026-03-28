@@ -282,6 +282,7 @@ add_library(openc2e_core OBJECT
 	src/openc2e/creatures/Creature.cpp
 	src/openc2e/creatures/CreatureAgent.cpp
 	src/openc2e/creatures/CreatureAI.cpp
+	src/openc2e/creatures/GeneticAlgorithms.cpp
 	src/openc2e/dialect.cpp
 	src/openc2e/Engine.cpp
 	src/openc2e/historyManager.cpp
@@ -320,6 +321,7 @@ add_library(openc2e_core OBJECT
 	src/openc2e/openc2eimgui/CreatureGrapher.cpp
 	src/openc2e/openc2eimgui/Hatchery.cpp
 	src/openc2e/openc2eimgui/ImGuiUtils.cpp
+	src/openc2e/openc2eimgui/GeneInspector.cpp
 	src/openc2e/openc2eimgui/MainMenu.cpp
 	src/openc2e/openc2eimgui/Openc2eImGui.cpp
 )
@@ -345,6 +347,15 @@ target_link_libraries(openc2e openc2e_core openc2e_sdlbackend)
 
 add_executable(test_openc2e
 	src/openc2e/tests/CaosTest.cpp
+	src/openc2e/tests/SVRuleTest.cpp
+	src/openc2e/tests/NeuroEmitterTest.cpp
+	src/openc2e/tests/InstinctTest.cpp
+	src/openc2e/tests/AgingTest.cpp
+	src/openc2e/tests/LearningTest.cpp
+	src/openc2e/tests/GeneticsTest.cpp
+	src/openc2e/tests/FacultyTest.cpp
+	src/openc2e/tests/GeneInspectorTest.cpp
+	src/openc2e/tests/LifecycleTest.cpp
 )
 target_link_libraries(test_openc2e openc2e_core gtest_main)
 

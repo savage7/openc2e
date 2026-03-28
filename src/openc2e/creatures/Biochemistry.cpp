@@ -376,7 +376,7 @@ float* c2eCreature::getLocusPointer(bool receptor, unsigned char o, unsigned cha
 			if (!lobe)
 				break;
 
-			unsigned int neuronid = o / 3, stateno = o % 3;
+			unsigned int neuronid = l / 3, stateno = l % 3;  // locus l encodes neuronIndex*3 + stateVarIndex (0=STATE, 1=INPUT, 2=OUTPUT)
 			if (neuronid >= lobe->getNoNeurons())
 				break;
 			return &lobe->getNeuron(neuronid)->variables[stateno];
@@ -547,7 +547,9 @@ void c2Organ::tick() {
 
 		ticked = true;
 
-		// chem 99 = ATP, chem 100 = ADP (hardcoded)
+		// Chemical 99 = ATP (C2 creature only), Chemical 100 = ADP (C2 creature only)
+		// C2-specific hardcoding: out of C3/DS scope per D-10 (C3 uses chem 35/36 for ATP/ADP)
+		// See .planning/phases/01-foundation/chemical-index-justification.md
 		unsigned char atplevel = parent->getChemical(99);
 		if (atplevel >= energycost) {
 			// energy consumption
@@ -617,7 +619,9 @@ void c2eOrgan::tick() {
 		biotick -= 1.0f;
 
 		// *** energy consumption
-		// chem 35 = ATP, chem 36 = ADP (TODO: fix hardcoding)
+		// Chemical 35 = ATP, justified: Materia Medica.catalogue "# chemical 30" entry 5 = "ATP"
+		// Chemical 36 = ADP, justified: Materia Medica.catalogue "# chemical 30" entry 6 = "ADP"
+		// See .planning/phases/01-foundation/chemical-index-justification.md
 		float atplevel = parent->getChemical(35);
 		// bool hadenergy = false;
 		if (atplevel >= energycost) {
@@ -645,7 +649,9 @@ void c2eOrgan::tick() {
 		// TODO: doesn't this mean STLF could go above LTLF?
 		float repair = diff * repairrate; // repairrate always <= 1.00
 		shorttermlifeforce += repair;
-		// adjust Injury chemical (TODO: de-hardcode)
+		// Chemical 127 = Injury, justified: Materia Medica.catalogue "# chemical 120" entry 7 = "Injury"
+		// Also confirmed by c3-gamedata-clean/Bootstrap/001 World/medical pod and screens.cos: "setv va02 chem 127"
+		// See .planning/phases/01-foundation/chemical-index-justification.md
 		parent->adjustChemical(127, -repair / lifeforce);
 
 		if (injurytoapply)
@@ -683,7 +689,8 @@ void c2eOrgan::applyInjury(float value) {
 	shorttermlifeforce -= value;
 	if (shorttermlifeforce < 0.0f)
 		shorttermlifeforce = 0.0f;
-	// adjust Injury chemical (TODO: de-hardcode)
+	// Chemical 127 = Injury, justified: Materia Medica.catalogue "# chemical 120" entry 7 = "Injury"
+	// See .planning/phases/01-foundation/chemical-index-justification.md
 	parent->adjustChemical(127, value / lifeforce);
 }
 
@@ -881,8 +888,7 @@ void c2eOrgan::processEmitter(c2eEmitter& d) {
 	if (!d.locus)
 		return;
 	float f = *d.locus;
-	if (g.clear)
-		*d.locus = 0.0f;
+	// EM_INVERT: invert locus value before threshold comparison (lc2e: sig = invert ? 1-src : src)
 	if (g.invert)
 		f = 1.0f - f;
 
@@ -892,9 +898,13 @@ void c2eOrgan::processEmitter(c2eEmitter& d) {
 		parent->adjustChemical(g.chemical, d.gain);
 	} else {
 		f = (f - d.threshold) * d.gain;
-		if (f > 0.0f) // TODO: correct check?
-			parent->adjustChemical(g.chemical, f);
+		if (f <= 0.0f) // no output if signal below threshold
+			return;
+		parent->adjustChemical(g.chemical, f);
 	}
+	// EM_REMOVE (g.clear): wipe locus ONLY after successful emission (lc2e: clear after threshold exceeded)
+	if (g.clear)
+		*d.locus = 0.0f;
 }
 
 void c1Creature::processReceptor(c1Receptor& d) {
@@ -1001,13 +1011,19 @@ void c2eOrgan::processReceptor(c2eReceptor& d, bool checkchem) {
 	if (!d.locus)
 		return;
 
+	// RE_DIGITAL (g.digital): all-or-nothing response if any signal above threshold
+	// RE_REDUCE (g.inverted): subtract from nominal rather than add (lc2e flag bit 1 = RE_REDUCE)
+	// Note: openc2e names this field 'inverted' but it maps to lc2e's RE_REDUCE (bit 1), not a
+	// separate RE_INVERTED flag (which does not exist in lc2e/C3 -- only RE_REDUCE and RE_DIGITAL).
 	float f;
 	if (g.digital)
 		f = d.lastvalue > d.threshold ? d.gain : 0.0f;
 	else
 		f = (d.lastvalue - d.threshold) * d.gain;
+	if (f < 0.0f)
+		f = 0.0f; // ignore signal below threshold
 	if (g.inverted)
-		f *= -1.0f;
+		f *= -1.0f; // RE_REDUCE: nominal - effect (subtract instead of add)
 	f += d.nominal;
 
 	if (f < 0.0f)
@@ -1150,6 +1166,16 @@ c2eEmitter::c2eEmitter(bioEmitterGene* g, c2eOrgan* parent) {
 	threshold = g->threshold / 255.0f;
 	gain = g->gain / 255.0f;
 	locus = parent->getLocusPointer(false, g->organ, g->tissue, g->locus, 0);
+}
+
+c2eNeuroEmitter::c2eNeuroEmitter(bioNeuroEmitterGene* g, c2eCreature* parent) {
+	data = g;
+	bioTick = 0.0f;
+	for (int i = 0; i < 3; i++) {
+		// locus = neuronIndex * 3 (matches openc2e's l/3 encoding; state 0 = STATE_VAR)
+		inputs[i] = parent->getLocusPointer(false, 0, g->lobes[i], g->neurons[i] * 3);
+		// null inputs are valid — treated as 1.0 during emission
+	}
 }
 
 /* vim: set noet: */

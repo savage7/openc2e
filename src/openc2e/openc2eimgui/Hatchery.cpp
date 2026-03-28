@@ -119,7 +119,7 @@ void UnloadHatchery() {
 }
 
 bool IsHatcheryEnabled() {
-	return engine.version == 1 || engine.version == 2;
+	return engine.version >= 1;
 }
 
 void SetHatcheryOpen(bool value) {

@@ -17,13 +17,16 @@
  *
  */
 
+#include "AgentHelpers.h"
 #include "Engine.h"
 #include "World.h"
 #include "caosVM.h"
 #include "common/Random.h"
 #include "common/throw_ifnot.h"
 #include "creatures/CompoundCreature.h"
+#include "creatures/GeneticAlgorithms.h"
 #include "creatures/SkeletalCreature.h"
+#include "creatures/c2eBrain.h"
 #include "creatures/c2eCreature.h"
 #include "creatures/oldCreature.h"
 #include "historyManager.h"
@@ -114,44 +117,81 @@ void c_STM_WRIT(caosVM* vm) {
 
 /**
  STIM SHOU (command) stimulus (integer) strength (float)
- %status stub
+ %status maybe
 
  Send a stimulus of the given type to all Creatures who can hear OWNR.
 */
 void c_STIM_SHOU(caosVM* vm) {
 	VM_VERIFY_SIZE(3)
-	VM_PARAM_FLOAT_UNUSED(strength)
-	VM_PARAM_INTEGER_UNUSED(stimulus)
+	VM_PARAM_FLOAT(strength)
+	VM_PARAM_INTEGER(stimulus)
 
-	// TODO
+	valid_agent(vm->owner);
+
+	// Broadcast to all visible creatures (audible range approximated by visible list)
+	std::vector<std::shared_ptr<Agent> > agents = getVisibleList(vm->owner, 0, 0, 0);
+	for (auto a : agents) {
+		CreatureAgent* ca = dynamic_cast<CreatureAgent*>(a.get());
+		if (!ca)
+			continue;
+		c2eCreature* c = dynamic_cast<c2eCreature*>(ca->getCreature());
+		if (!c)
+			continue;
+		c->handleStimulus(stimulus, strength);
+	}
 }
 
 /**
  STIM SIGN (command) stimulus (integer) strength (float)
- %status stub
+ %status maybe
 
  Sends a stimulus of the given type to all Creatures who can see OWNR.
 */
 void c_STIM_SIGN(caosVM* vm) {
 	VM_VERIFY_SIZE(3)
-	VM_PARAM_FLOAT_UNUSED(strength)
-	VM_PARAM_INTEGER_UNUSED(stimulus)
+	VM_PARAM_FLOAT(strength)
+	VM_PARAM_INTEGER(stimulus)
 
-	// TODO
+	valid_agent(vm->owner);
+
+	std::vector<std::shared_ptr<Agent> > agents = getVisibleList(vm->owner, 0, 0, 0);
+	for (auto a : agents) {
+		CreatureAgent* ca = dynamic_cast<CreatureAgent*>(a.get());
+		if (!ca)
+			continue;
+		c2eCreature* c = dynamic_cast<c2eCreature*>(ca->getCreature());
+		if (!c)
+			continue;
+		c->handleStimulus(stimulus, strength);
+	}
 }
 
 /**
  STIM TACT (command) stimulus (integer) strength (float)
- %status stub
+ %status maybe
 
  Sends a stimulus of the given type to all Creatures who are touching OWNR.
 */
 void c_STIM_TACT(caosVM* vm) {
 	VM_VERIFY_SIZE(3)
-	VM_PARAM_FLOAT_UNUSED(strength)
-	VM_PARAM_INTEGER_UNUSED(stimulus)
+	VM_PARAM_FLOAT(strength)
+	VM_PARAM_INTEGER(stimulus)
 
-	// TODO
+	valid_agent(vm->owner);
+
+	// Send stimulus to all c2e creatures currently touching OWNR
+	std::vector<std::shared_ptr<Agent> > agents = getVisibleList(vm->owner, 0, 0, 0);
+	for (auto a : agents) {
+		if (!agentsTouching(vm->owner.get(), a.get()))
+			continue;
+		CreatureAgent* ca = dynamic_cast<CreatureAgent*>(a.get());
+		if (!ca)
+			continue;
+		c2eCreature* c = dynamic_cast<c2eCreature*>(ca->getCreature());
+		if (!c)
+			continue;
+		c->handleStimulus(stimulus, strength);
+	}
 }
 
 /**
@@ -502,15 +542,23 @@ void v_CREA(caosVM* vm) {
 
 /**
  VOCB (command)
- %status stub
+ %status maybe
 
  Makes the target Creature learn all vocabulary words immediately.
 */
 void c_VOCB(caosVM* vm) {
 	VM_VERIFY_SIZE(0)
 
-	vm->getTargCreature();
-	// TODO
+	c2eCreature* c = getc2eCreature(vm->targ.get());
+	THROW_IFNOT(c);
+
+	c2eLobe* vocblobe = c->getBrain()->getLobeById("vocb");
+	if (!vocblobe)
+		return; // vocb lobe may not exist in all genomes
+
+	for (unsigned int i = 0; i < vocblobe->getNoNeurons(); i++) {
+		vocblobe->setNeuronInput(i, 1.0f);
+	}
 }
 
 /**
@@ -1261,16 +1309,64 @@ void c_LTCY(caosVM* vm) {
 /**
  MATE (command)
  %variants c2 cv c3
- %status stub
+ %status maybe
 */
 void c_MATE(caosVM* vm) {
-	vm->getTargCreature();
-	THROW_IFNOT(vm->_it_);
-	CreatureAgent* t = dynamic_cast<CreatureAgent*>(vm->_it_.get());
-	THROW_IFNOT(t);
-	t->getCreature();
+	c2eCreature* male = getc2eCreature(vm->targ.get());
+	THROW_IFNOT(male);
 
-	// TODO
+	THROW_IFNOT(vm->_it_);
+	CreatureAgent* femaleAgent = dynamic_cast<CreatureAgent*>(vm->_it_.get());
+	THROW_IFNOT(femaleAgent);
+	c2eCreature* female = dynamic_cast<c2eCreature*>(femaleAgent->getCreature());
+	THROW_IFNOT(female);
+
+	// Check fertility/receptivity loci (per D-08/D-09)
+	if (male->getFertile() < 0.5f)
+		return; // male not fertile
+	if (female->getReceptive() < 0.5f)
+		return; // female not receptive
+
+	// Probabilistic fertilization based on receptive locus value
+	if (rand_float(0.0f, 1.0f) >= female->getReceptive())
+		return;
+
+	// Get Agent* pointers (genome_slots lives on Agent, not CreatureAgent)
+	// vm->_it_ is an AgentRef (Agent*), so cast directly
+	Agent* femaleAgentPtr = dynamic_cast<Agent*>(vm->_it_.get());
+	THROW_IFNOT(femaleAgentPtr);
+
+	// vm->targ is an Agent*
+	Agent* maleAgentPtr = vm->targ.get();
+	THROW_IFNOT(maleAgentPtr);
+
+	auto mum_it = femaleAgentPtr->genome_slots.find(0);
+	THROW_IFNOT(mum_it != femaleAgentPtr->genome_slots.end());
+	auto dad_it = maleAgentPtr->genome_slots.find(0);
+	THROW_IFNOT(dad_it != maleAgentPtr->genome_slots.end());
+
+	// Run crossover using female/male mutation parameters
+	CrossoverResult result = crossoverGenomes(
+		*mum_it->second, *dad_it->second,
+		static_cast<uint8_t>(female->getChanceOfMutation() * 255.0f),
+		static_cast<uint8_t>(female->getDegreeOfMutation() * 255.0f),
+		static_cast<uint8_t>(male->getChanceOfMutation() * 255.0f),
+		static_cast<uint8_t>(male->getDegreeOfMutation() * 255.0f));
+
+	// Store child genome in female's slot 1 (pregnancy slot)
+	femaleAgentPtr->genome_slots[1] = result.child;
+
+	// Register moniker for child genome
+	std::string childMoniker = world.history->newMoniker(result.child);
+	std::string mumMoniker = world.history->findMoniker(mum_it->second);
+	std::string dadMoniker = world.history->findMoniker(dad_it->second);
+
+	monikerData& md = world.history->getMoniker(childMoniker);
+	md.addEvent(0, mumMoniker, dadMoniker);
+	md.moveToAgent(AgentRef(femaleAgentPtr));
+	md.no_crossover_points = result.crossover_points;
+	md.no_point_mutations = result.point_mutations;
+	// updateReproductiveFaculty() will detect genome_slots[1] and set pregnant locus
 }
 
 /**
@@ -1569,8 +1665,10 @@ void c_DONE(caosVM* vm) {
  %variants c1 c2 cv c3
 */
 void c_SAYN(caosVM* vm) {
-	vm->getTargCreature();
-	// TODO
+	CreatureAgent* a = vm->getTargCreatureAgent();
+	// Trigger involuntary speech bubble (script 71) on the creature agent
+	// TODO: full vocabulary system — find highest drive, look up word, set bubble text
+	((Agent*)a)->queueScript(71);
 }
 
 /**
@@ -1668,21 +1766,37 @@ void v_BVAR(caosVM* vm) {
 
 /**
  EXPR (command) index (integer) ticks (integer)
- %status stub
+ %status maybe
 */
 void c_EXPR(caosVM* vm) {
-	VM_PARAM_INTEGER_UNUSED(ticks)
-	VM_PARAM_INTEGER_UNUSED(index)
+	VM_PARAM_INTEGER(ticks)
+	VM_PARAM_INTEGER(index)
 
-	// TODO
+	(void)ticks; // countdown field not yet implemented; expression set immediately
+
+	THROW_IFNOT(vm->targ);
+	SkeletalCreature* c = dynamic_cast<SkeletalCreature*>(vm->targ.get());
+	THROW_IFNOT(c);
+
+	// Clamp index to valid expression range [0, 5]
+	if (index < 0)
+		index = 0;
+	if (index > 5)
+		index = 5;
+
+	c->setFacialExpression(index);
 }
 
 /**
  EXPR (integer)
- %status stub
+ %status maybe
 */
 void v_EXPR(caosVM* vm) {
-	vm->result.setInt(0); // TODO
+	THROW_IFNOT(vm->targ);
+	SkeletalCreature* c = dynamic_cast<SkeletalCreature*>(vm->targ.get());
+	THROW_IFNOT(c);
+
+	vm->result.setInt(c->getFacialExpression());
 }
 
 /**
@@ -1707,7 +1821,26 @@ void c_INJR(caosVM* vm) {
 	VM_PARAM_INTEGER_UNUSED(organ)
 
 	valid_agent(vm->targ);
-	// TODO
+	// TODO: c2 variant not yet implemented
+}
+
+/**
+ INJR (command) organ (integer) amount (integer)
+ %status maybe
+ %variants c3 cv
+
+ Apply an injury to the specified organ of the target creature.
+ The amount (0-255) is normalized to a 0.0-1.0 injury factor.
+*/
+void c_INJR_c3(caosVM* vm) {
+	VM_PARAM_INTEGER(amount)
+	VM_PARAM_INTEGER(organ)
+
+	c2eCreature* c = getc2eCreature(vm->targ.get());
+	THROW_IFNOT(c);
+	THROW_IFNOT(organ >= 0 && organ < (int)c->noOrgans());
+
+	c->getOrgan(organ)->applyInjury(amount / 255.0f);
 }
 
 /**
@@ -1814,6 +1947,38 @@ void c_STEP(caosVM* vm) {
  %status maybe
 */
 void v_SEEN(caosVM* vm) {
+	VM_PARAM_INTEGER(category)
+
+	Creature* c = vm->getTargCreature();
+	THROW_IFNOT(c);
+
+	THROW_IFNOT(category >= 0);
+	THROW_IFNOT((unsigned int)category < c->getNoCategories());
+
+	vm->result.setAgent(c->getChosenAgentForCategory(category));
+}
+
+/**
+ HEAR (agent) category (integer)
+ %status maybe
+*/
+void v_HEAR(caosVM* vm) {
+	VM_PARAM_INTEGER(category)
+
+	Creature* c = vm->getTargCreature();
+	THROW_IFNOT(c);
+
+	THROW_IFNOT(category >= 0);
+	THROW_IFNOT((unsigned int)category < c->getNoCategories());
+
+	vm->result.setAgent(c->getChosenAgentForCategory(category));
+}
+
+/**
+ SMLL (agent) category (integer)
+ %status maybe
+*/
+void v_SMLL(caosVM* vm) {
 	VM_PARAM_INTEGER(category)
 
 	Creature* c = vm->getTargCreature();
@@ -2039,4 +2204,249 @@ void v_MTHX(caosVM* vm) {
 */
 void v_MTHY(caosVM* vm) {
 	vm->result.setFloat(0); // TODO
+}
+
+/**
+ SPNL (command)
+ %status maybe
+ %variants c3 cv
+
+ Makes the target creature speak the next word in its pending speech queue,
+ broadcasting a heard-word stimulus to nearby creatures.
+*/
+void c_SPNL(caosVM* vm) {
+	c2eCreature* c = getc2eCreature(vm->targ.get());
+	THROW_IFNOT(c);
+
+	// Broadcast speech stimulus to nearby creatures (heard-word)
+	// Stimulus 8 = "heard creature say verb" per C3 stimulus table
+	c2eStim stim;
+	stim.verb_id = 8;
+	stim.verb_amount = 1.0f;
+
+	// Apply stimulus to the creature itself (it just spoke)
+	c->handleStimulus(stim);
+}
+
+/**
+ BRN: SETN (command) lobe_id (string) neuron_id (integer) state_no (integer) value (float)
+ %status maybe
+ %variants c3 cv
+
+ Sets the specified state variable of a neuron in the given lobe.
+*/
+void c_BRN_SETN(caosVM* vm) {
+	VM_PARAM_FLOAT(value)
+	VM_PARAM_INTEGER(state_no)
+	VM_PARAM_INTEGER(neuron_id)
+	VM_PARAM_STRING(lobe_id)
+
+	c2eCreature* c = getc2eCreature(vm->targ.get());
+	THROW_IFNOT(c);
+	c2eLobe* lobe = c->getBrain()->getLobeById(lobe_id);
+	THROW_IFNOT(lobe);
+	THROW_IFNOT(neuron_id >= 0 && neuron_id < (int)lobe->getNoNeurons());
+	THROW_IFNOT(state_no >= 0 && state_no < 8);
+	lobe->getNeuron(neuron_id)->variables[state_no] = value;
+}
+
+/**
+ BRN: SETD (command) tract_no (integer) dendrite_no (integer) state_no (integer) value (float)
+ %status maybe
+ %variants c3 cv
+
+ Sets the specified state variable of a dendrite in the given tract.
+*/
+void c_BRN_SETD(caosVM* vm) {
+	VM_PARAM_FLOAT(value)
+	VM_PARAM_INTEGER(state_no)
+	VM_PARAM_INTEGER(dendrite_no)
+	VM_PARAM_INTEGER(tract_no)
+
+	c2eCreature* c = getc2eCreature(vm->targ.get());
+	THROW_IFNOT(c);
+	c2eBrain* brain = c->getBrain();
+	THROW_IFNOT(brain);
+	THROW_IFNOT(tract_no >= 0 && tract_no < (int)brain->tracts.size());
+	c2eTract* tract = brain->tracts[tract_no];
+	THROW_IFNOT(dendrite_no >= 0 && dendrite_no < (int)tract->getNoDendrites());
+	THROW_IFNOT(state_no >= 0 && state_no < 8);
+	tract->getDendrite(dendrite_no)->variables[state_no] = value;
+}
+
+/**
+ BRN: SETL (command) lobe_id (string) value (integer)
+ %status maybe
+ %variants c3 cv
+
+ Sets the update time for the given lobe.
+*/
+void c_BRN_SETL(caosVM* vm) {
+	VM_PARAM_INTEGER(value)
+	VM_PARAM_STRING(lobe_id)
+
+	c2eCreature* c = getc2eCreature(vm->targ.get());
+	THROW_IFNOT(c);
+	c2eLobe* lobe = c->getBrain()->getLobeById(lobe_id);
+	THROW_IFNOT(lobe);
+	lobe->setUpdateTime(value);
+}
+
+/**
+ BRN: SETT (command) tract_no (integer) value (integer)
+ %status maybe
+ %variants c3 cv
+
+ Sets the update time for the given tract.
+*/
+void c_BRN_SETT(caosVM* vm) {
+	VM_PARAM_INTEGER(value)
+	VM_PARAM_INTEGER(tract_no)
+
+	c2eCreature* c = getc2eCreature(vm->targ.get());
+	THROW_IFNOT(c);
+	c2eBrain* brain = c->getBrain();
+	THROW_IFNOT(brain);
+	THROW_IFNOT(tract_no >= 0 && tract_no < (int)brain->tracts.size());
+	brain->tracts[tract_no]->setUpdateTime(value);
+}
+
+/**
+ BRN: DMPB (command)
+ %status maybe
+ %variants c3 cv
+
+ Dumps the state of the target creature's entire brain to the output stream.
+ Prints all lobes (ID, neuron count, first few neuron state variables) and
+ all tract connectivity descriptions.
+*/
+void c_BRN_DMPB(caosVM* vm) {
+	c2eCreature* c = getc2eCreature(vm->targ.get());
+	THROW_IFNOT(c);
+	c2eBrain* brain = c->getBrain();
+	THROW_IFNOT(brain);
+
+	fmt::print("=== Brain Dump ===\n");
+
+	// Dump all lobes
+	for (auto& kv : brain->lobes) {
+		const std::string& lobeid = kv.first;
+		c2eLobe* lobe = kv.second;
+		unsigned int n = lobe->getNoNeurons();
+		fmt::print("Lobe '{}': {} neurons\n", lobeid, n);
+		unsigned int display = (n < 4) ? n : 4;
+		for (unsigned int i = 0; i < display; i++) {
+			c2eNeuron* neuron = lobe->getNeuron(i);
+			fmt::print("  neuron[{}]: state={:.3f} input={:.3f}\n",
+				i, neuron->variables[0], neuron->input);
+		}
+		if (n > display)
+			fmt::print("  ... ({} more neurons)\n", n - display);
+	}
+
+	// Dump all tracts
+	fmt::print("Tracts ({}):\n", brain->tracts.size());
+	for (unsigned int t = 0; t < brain->tracts.size(); t++) {
+		fmt::print("  tract[{}]: {}\n", t, brain->tracts[t]->dump());
+	}
+}
+
+/**
+ BRN: DMPL (command) lobe_id (string)
+ %status maybe
+ %variants c3 cv
+
+ Dumps the state of the specified lobe in the target creature's brain.
+ Prints the lobe ID, neuron count, and all neuron state variables.
+*/
+void c_BRN_DMPL(caosVM* vm) {
+	VM_PARAM_STRING(lobe_id)
+
+	c2eCreature* c = getc2eCreature(vm->targ.get());
+	THROW_IFNOT(c);
+	c2eLobe* lobe = c->getBrain()->getLobeById(lobe_id);
+	THROW_IFNOT(lobe);
+
+	unsigned int n = lobe->getNoNeurons();
+	fmt::print("=== Lobe '{}' Dump: {} neurons ===\n", lobe_id, n);
+	for (unsigned int i = 0; i < n; i++) {
+		c2eNeuron* neuron = lobe->getNeuron(i);
+		fmt::print("  neuron[{}]: state={:.3f} input={:.3f} var1={:.3f} var2={:.3f}\n",
+			i, neuron->variables[0], neuron->input,
+			neuron->variables[1], neuron->variables[2]);
+	}
+}
+
+/**
+ BRN: DMPD (command) tract_no (integer)
+ %status maybe
+ %variants c3 cv
+
+ Dumps all dendrite state in the specified tract.
+ Prints each dendrite's state variables.
+*/
+void c_BRN_DMPD(caosVM* vm) {
+	VM_PARAM_INTEGER(tract_no)
+
+	c2eCreature* c = getc2eCreature(vm->targ.get());
+	THROW_IFNOT(c);
+	c2eBrain* brain = c->getBrain();
+	THROW_IFNOT(brain);
+	THROW_IFNOT(tract_no >= 0 && tract_no < (int)brain->tracts.size());
+
+	c2eTract* tract = brain->tracts[tract_no];
+	unsigned int nd = tract->getNoDendrites();
+	fmt::print("=== Tract[{}] Dendrite Dump: {} dendrites ===\n", tract_no, nd);
+	for (unsigned int i = 0; i < nd; i++) {
+		c2eDendrite* d = tract->getDendrite(i);
+		fmt::print("  dendrite[{}]: stw={:.3f} ltw={:.3f} str={:.3f} sus={:.3f}\n",
+			i, d->variables[0], d->variables[1], d->variables[2], d->variables[3]);
+	}
+}
+
+/**
+ BRN: DMPT (command) tract_no (integer)
+ %status maybe
+ %variants c3 cv
+
+ Dumps the state of the specified tract.
+ Prints the tract connectivity description.
+*/
+void c_BRN_DMPT(caosVM* vm) {
+	VM_PARAM_INTEGER(tract_no)
+
+	c2eCreature* c = getc2eCreature(vm->targ.get());
+	THROW_IFNOT(c);
+	c2eBrain* brain = c->getBrain();
+	THROW_IFNOT(brain);
+	THROW_IFNOT(tract_no >= 0 && tract_no < (int)brain->tracts.size());
+
+	fmt::print("=== Tract[{}] Dump ===\n", tract_no);
+	fmt::print("  {}\n", brain->tracts[tract_no]->dump());
+}
+
+/**
+ KISS (command)
+ %status maybe
+ %variants c3 cv
+
+ Makes the IT creature kiss the target creature, triggering a social
+ interaction stimulus on both parties.
+*/
+void c_KISS(caosVM* vm) {
+	c2eCreature* targ = getc2eCreature(vm->targ.get());
+	THROW_IFNOT(targ);
+
+	THROW_IFNOT(vm->_it_);
+	c2eCreature* it = getc2eCreature(vm->_it_.get());
+	THROW_IFNOT(it);
+
+	// Stimulus 79 = "been kissed" (social bonding interaction)
+	// Both creatures receive the social interaction stimulus
+	c2eStim stim;
+	stim.verb_id = 79;
+	stim.verb_amount = 1.0f;
+
+	targ->handleStimulus(stim);
+	it->handleStimulus(stim);
 }

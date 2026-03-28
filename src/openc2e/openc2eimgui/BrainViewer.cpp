@@ -19,9 +19,9 @@ void SetBrainViewerOpen(bool value) {
 	s_brain_viewer_open = value;
 }
 
-static const int neuron_var = 0;
-static const int dendrite_var = 0;
-static const float threshold = -1000.0f;
+static int s_neuron_var = 0;
+static int s_dendrite_var = 0;
+static float s_threshold = -1000.0f;
 
 static ImVec2 GetBrainViewSize(Creature* creature) {
 	int neededwidth = 2, neededheight = 2;
@@ -59,15 +59,14 @@ static ImVec2 GetBrainViewSize(Creature* creature) {
 	return ImVec2((neededwidth + 6) * 20, (neededheight + 5) * 20);
 }
 
-static void drawLobeBoundaries(unsigned int x, unsigned int y, unsigned int width, unsigned int height, std::string text) {
+static void drawLobeBoundaries(unsigned int x, unsigned int y, unsigned int width, unsigned int height, std::string text, ImU32 color = IM_COL32_WHITE) {
 	ImDrawList* drawlist = ImGui::GetWindowDrawList();
 	ImVec2 cur = ImGui::GetCursorScreenPos();
 
 	ImVec2 p((x + 4) * 20, (y + 4) * 20);
 
-	// TODO: color?
-	drawlist->AddRect(cur + p, cur + p + ImVec2(width * 20, height * 20), IM_COL32_WHITE);
-	drawlist->AddText(cur + p - ImVec2(0, 20), IM_COL32_WHITE, text.c_str());
+	drawlist->AddRect(cur + p, cur + p + ImVec2(width * 20, height * 20), color);
+	drawlist->AddText(cur + p - ImVec2(0, 20), color, text.c_str());
 }
 
 static std::string niceNameForOldLobe(unsigned int id) {
@@ -112,13 +111,14 @@ static void drawOldBrain(oldBrain* b) {
 				neuroncoords[neuron] = std::pair<unsigned int, unsigned int>(lobex + (x * 20) + 10, lobey + (y * 20) + 10);
 
 				// if below threshold, don't draw
-				float var = neuron->output / 255.0f; // TODO: allow choosing of state too?
+				// oldBrain neurons only have output, not state variables
+				float var = (s_neuron_var == 0) ? neuron->output / 255.0f : 0.0f;
 				// TODO: muh
-				if (threshold == 0.0f) {
-					if (var == threshold)
+				if (s_threshold == 0.0f) {
+					if (var == s_threshold)
 						continue;
 				} else {
-					if (var <= threshold)
+					if (var <= s_threshold)
 						continue;
 				}
 
@@ -142,11 +142,11 @@ static void drawOldBrain(oldBrain* b) {
 					oldNeuron* src = d->src;
 
 					float var = d->strength / 255.0;
-					if (threshold == 0.0f) {
-						if (var == threshold)
+					if (s_threshold == 0.0f) {
+						if (var == s_threshold)
 							continue;
 					} else {
-						if (var <= threshold)
+						if (var <= s_threshold)
 							continue;
 					}
 
@@ -177,8 +177,7 @@ static void drawC2eBrain(c2eBrain* b) {
 	for (auto& i : b->lobes) {
 		c2eBrainLobeGene* lobe = i.second->getGene();
 		ImU32 color = IM_COL32(lobe->red, lobe->green, lobe->blue, 255);
-		// TODO: set color
-		drawLobeBoundaries(lobe->x, lobe->y, lobe->width, lobe->height, i.first);
+		drawLobeBoundaries(lobe->x, lobe->y, lobe->width, lobe->height, i.first, color);
 
 		for (unsigned int y = 0; y < lobe->height; y++) {
 			for (unsigned int x = 0; x < lobe->width; x++) {
@@ -202,13 +201,13 @@ static void drawC2eBrain(c2eBrain* b) {
 				}
 
 				// if below threshold, don't draw
-				float var = neuron->variables[neuron_var];
+				float var = neuron->variables[s_neuron_var];
 				// TODO: muh
-				if (threshold == 0.0f) {
-					if (var == threshold)
+				if (s_threshold == 0.0f) {
+					if (var == s_threshold)
 						continue;
 				} else {
-					if (var <= threshold)
+					if (var <= s_threshold)
 						continue;
 				}
 
@@ -234,12 +233,12 @@ static void drawC2eBrain(c2eBrain* b) {
 		for (unsigned int j = 0; j < (*i)->getNoDendrites(); j++) {
 			c2eDendrite* dend = (*i)->getDendrite(j);
 
-			float var = dend->variables[dendrite_var];
-			if (threshold == 0.0f) {
-				if (var == threshold)
+			float var = dend->variables[s_dendrite_var];
+			if (s_threshold == 0.0f) {
+				if (var == s_threshold)
 					continue;
 			} else {
-				if (var <= threshold)
+				if (var <= s_threshold)
 					continue;
 			}
 
@@ -258,6 +257,11 @@ static void drawC2eBrain(c2eBrain* b) {
 
 void DrawBrainViewer() {
 	if (ImGuiUtils::BeginWindow("Brain Viewer", &s_brain_viewer_open, ImGuiWindowFlags_AlwaysVerticalScrollbar | ImGuiWindowFlags_AlwaysHorizontalScrollbar)) {
+		ImGui::SliderInt("Neuron variable", &s_neuron_var, 0, 7);
+		ImGui::SliderInt("Dendrite variable", &s_dendrite_var, 0, 7);
+		ImGui::SliderFloat("Threshold", &s_threshold, -1000.0f, 1.0f);
+		ImGui::Separator();
+
 		CreatureAgent* creatureagent = dynamic_cast<CreatureAgent*>(world.selectedcreature.get());
 		Creature* creature = creatureagent ? creatureagent->getCreature() : nullptr;
 
